@@ -14,8 +14,22 @@ import android.view.*
 import android.widget.*
 import java.text.DateFormat
 import java.util.Date
+import java.lang.ref.WeakReference
+
+/** Only a visibly resumed activity may open the call screen directly. */
+object CallPresentation {
+    private var resumed = WeakReference<Activity>(null)
+    fun resumed(activity: Activity) { resumed = WeakReference(activity) }
+    fun paused(activity: Activity) { if (resumed.get() === activity) resumed.clear() }
+    fun visibleActivity(): Activity? = resumed.get()?.takeUnless { it.isFinishing || it.isDestroyed }
+    fun show(activity: Activity, id: Int) {
+        activity.startActivity(Intent(activity, ReminderActivity::class.java).putExtra("id", id))
+    }
+}
 
 open class BaseActivity : Activity() {
+    override fun onResume() { super.onResume(); CallPresentation.resumed(this) }
+    override fun onPause() { CallPresentation.paused(this); super.onPause() }
     protected val mint = Color.rgb(136, 224, 194)
     protected val white = Color.rgb(237, 245, 243)
     protected fun dp(n: Int) = (n * resources.displayMetrics.density).toInt()
@@ -61,6 +75,8 @@ class MainActivity : BaseActivity() {
         super.onResume()
         Reminders.restore(this)
         render()
+        Reminders.all(this).firstOrNull { it.state in setOf("ringing", "answering", "speaking") }
+            ?.let { CallPresentation.show(this, it.id) }
     }
     override fun onDestroy() { unregisterReceiver(changes); super.onDestroy() }
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
@@ -79,7 +95,7 @@ class MainActivity : BaseActivity() {
         with(root) {
             text("CALL REMINDER  /  PROTOTYPE", 12f, true)
             text("A meeting reminder\nyou can’t overlook.", 30f).setTypeface(null, Typeface.BOLD)
-            text("Two calls. One meeting. Dismiss the first and the second still rings.")
+            text("Two calls. One meeting. Swipe to answer and hear your reminder. The second call still rings.")
             text("Ready to ring", 20f, true)
             if (!notifications()) button("Enable notifications") {
                 if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
@@ -91,7 +107,7 @@ class MainActivity : BaseActivity() {
             if (!fullScreen()) button("Allow full-screen reminders") { settings(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT) }
             else text("✓ Full-screen reminders enabled", 14f)
             text("Quick test", 22f, true)
-            text("Calls ring in 10 and 50 seconds. Each rings for up to 30 seconds. Lock the screen after starting. When unlocked, Android may show a notification instead of opening the call screen.", 14f)
+            text("Calls ring in 10 and 50 seconds. The swipe screen opens here or over the lock screen. While using another app, use Answer in the incoming-call banner. Each unanswered call rings for up to 30 seconds.", 14f)
             button("Start two test calls", true) { runTest(true) }.isEnabled = notifications() && Reminders.canSchedule(this@MainActivity)
             button("Schedule sample meeting in 20 min") { runTest(false) }.isEnabled = notifications() && Reminders.canSchedule(this@MainActivity)
             val reminders = Reminders.all(this@MainActivity)
@@ -108,52 +124,4 @@ class MainActivity : BaseActivity() {
             text("Calendar connection comes next. These sample meetings stay on this device. Alarm volume and Do Not Disturb settings affect audibility.", 13f)
         }
     }
-}
-
-class ReminderActivity : BaseActivity() {
-    private var reminderId = -1
-    private val changes = object : BroadcastReceiver() {
-        override fun onReceive(c: Context, i: Intent) {
-            if (Reminders.all(c).none { it.id == reminderId && it.state == "ringing" }) finish()
-        }
-    }
-    override fun onCreate(state: Bundle?) {
-        super.onCreate(state)
-        setShowWhenLocked(true); setTurnScreenOn(true)
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        if (Build.VERSION.SDK_INT >= 33) registerReceiver(changes, IntentFilter("com.sriram.callreminder.STATE"), RECEIVER_NOT_EXPORTED)
-        else @Suppress("UnspecifiedRegisterReceiverFlag") registerReceiver(changes, IntentFilter("com.sriram.callreminder.STATE"))
-        render()
-    }
-    override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); setIntent(intent); render() }
-    private fun dismiss() {
-        startService(Intent(this, RingService::class.java).setAction("dismiss").putExtra("id", reminderId))
-        finish()
-    }
-    private fun render() {
-        reminderId = intent.getIntExtra("id", -1)
-        val r = Reminders.all(this).firstOrNull { it.id == reminderId && it.state == "ringing" }
-        if (r == null) { finish(); return }
-        with(column()) {
-            gravity = Gravity.CENTER_HORIZONTAL
-            text("INCOMING MEETING REMINDER", 12f, true)
-            text("◉", 80f, true)
-            text(r.title, 34f).apply { gravity = Gravity.CENTER; setTypeface(null, Typeface.BOLD) }
-            text(if (r.test) "Test call ${r.sequence} of 2" else "Starts in ${r.leadMinutes} minutes", 23f, true)
-            text("Meeting at ${clock(r.meetingAt)}", 16f)
-            val message = when {
-                r.test && r.sequence == 1 -> "This is a test of your meeting alarm.\nThe next call remains scheduled when you dismiss this one."
-                r.test -> "This is your final test reminder.\nDismiss when you’re ready."
-                else -> "Your meeting is coming up.\nDismiss this call when you’re ready."
-            }
-            text(message, 16f).gravity = Gravity.CENTER
-            button("Dismiss this call", true) { dismiss() }
-            button("Skip remaining reminders") { Reminders.cancel(this@ReminderActivity); finish() }
-            text("Sample meeting · no meeting link attached", 13f)
-            for (index in 0 until childCount) {
-                (getChildAt(index) as? TextView)?.gravity = Gravity.CENTER
-            }
-        }
-    }
-    override fun onDestroy() { unregisterReceiver(changes); super.onDestroy() }
 }

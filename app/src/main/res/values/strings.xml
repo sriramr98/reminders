@@ -1,0 +1,5 @@
+<resources>
+    <string name="connected_time">Connected  ·  %1$02d:%2$02d</string>
+    <string name="decline">Decline</string>
+    <string name="skip_both">Skip both reminders</string>
+</resources>

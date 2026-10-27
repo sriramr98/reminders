@@ -7,13 +7,13 @@ import org.json.JSONObject
 
 /** Calendar integration will supply real occurrences to this same scheduler. */
 data class Reminder(val id: Int, val title: String, val meetingAt: Long, val fireAt: Long,
-                    val leadMinutes: Int, val test: Boolean, val state: String = "scheduled") {
+                    val leadMinutes: Int, val test: Boolean, val state: String = "scheduled", val spokenText: String = "") {
     val sequence get() = if (leadMinutes == 15) 1 else 2
     fun json() = JSONObject().put("id", id).put("title", title).put("meetingAt", meetingAt)
-        .put("fireAt", fireAt).put("leadMinutes", leadMinutes).put("test", test).put("state", state)
+        .put("fireAt", fireAt).put("leadMinutes", leadMinutes).put("test", test).put("state", state).put("spokenText", spokenText)
     companion object {
         fun read(o: JSONObject) = Reminder(o.getInt("id"), o.getString("title"), o.getLong("meetingAt"),
-            o.getLong("fireAt"), o.getInt("leadMinutes"), o.getBoolean("test"), o.getString("state"))
+            o.getLong("fireAt"), o.getInt("leadMinutes"), o.getBoolean("test"), o.getString("state"), o.optString("spokenText"))
     }
 }
 
@@ -26,7 +26,9 @@ object Reminders {
     private fun save(c: Context, items: List<Reminder>) {
         check(prefs(c).edit().putString("items", JSONArray().apply { items.forEach { put(it.json()) } }.toString()).commit())
     }
-    fun update(c: Context, id: Int, state: String) = save(c, all(c).map { if (it.id == id) it.copy(state = state) else it })
+    fun update(c: Context, id: Int, state: String, spokenText: String? = null) = save(c, all(c).map {
+        if (it.id == id) it.copy(state = state, spokenText = spokenText ?: it.spokenText) else it
+    })
     fun times(meetingAt: Long) = listOf(15, 2).map { it to meetingAt - it * 60_000L }
     fun canSchedule(c: Context) = c.getSystemService(AlarmManager::class.java).canScheduleExactAlarms()
     private fun pending(c: Context, r: Reminder) = PendingIntent.getBroadcast(c, r.id,
