@@ -16,6 +16,8 @@ android {
     }
 }
 dependencies {
+    implementation("com.google.android.gms:play-services-auth:22.0.0")
+    implementation("androidx.work:work-runtime:2.11.0")
     androidTestImplementation("androidx.test:runner:1.7.0")
     androidTestImplementation("junit:junit:4.13.2")
 }

@@ -7,9 +7,11 @@ import android.media.*
 import android.os.*
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.widget.Toast
 import java.util.Locale
 
 class RingService : Service() {
+    companion object { @Volatile var currentId: Int? = null; private set }
     private val handler = Handler(Looper.getMainLooper())
     private var player: MediaPlayer? = null
     private var vibrator: Vibrator? = null
@@ -18,6 +20,12 @@ class RingService : Service() {
     private var speech: TextToSpeech? = null
     private var answering = false
     private var focus: AudioFocusRequest? = null
+    private var callAudio: CallAudio? = null
+    private var speechStarted = false
+    private var routeReady = false
+    private var engineReady = false
+    private var spokenMessage = ""
+    private var speakerEnabled = false
     private val speechTimeout = Runnable { end("speech unavailable", false) }
     private val timeout = Runnable { end("missed", true) }
     override fun onBind(intent: Intent?) = null
@@ -32,12 +40,21 @@ class RingService : Service() {
             else if (active == null) stopSelf()
             return START_NOT_STICKY
         }
+        if (intent?.action == "toggle_speaker") {
+            if (intent.getIntExtra("id", -1) == active?.id && answering) {
+                if (callAudio?.speaker(!speakerEnabled) != true) {
+                    Toast.makeText(this, "Could not switch call audio", Toast.LENGTH_SHORT).show()
+                }
+            } else if (active == null) stopSelf()
+            return START_NOT_STICKY
+        }
         val r = Reminders.all(this).firstOrNull { it.id == intent?.getIntExtra("id", -1) && it.state == "ringing" }
         if (r == null) { if (active == null) stopSelf(); return START_NOT_STICKY }
         active?.let { Reminders.update(this, it.id, "interrupted by next reminder") }
         release()
         answering = false
         active = r
+        currentId = r.id
         val nm = getSystemService(NotificationManager::class.java)
         val visible = CallPresentation.visibleActivity()
         nm.createNotificationChannel(NotificationChannel("meeting_alarms", "Meeting calls", NotificationManager.IMPORTANCE_HIGH).apply {
@@ -89,10 +106,12 @@ class RingService : Service() {
     }
     private fun changed() { sendBroadcast(Intent("com.sriram.callreminder.STATE").setPackage(packageName)) }
     private fun answer() {
-        val r = active ?: return
+        val r = active?.let { current -> Reminders.all(this).firstOrNull { it.id == current.id } } ?: return
+        active = r
         release() // Stop ringtone, vibration, and the missed-call timeout before speaking.
         answering = true
         val message = Announcement.text(r, System.currentTimeMillis())
+        spokenMessage = message
         Reminders.update(this, r.id, "answering", message)
         changed()
         val dismiss = PendingIntent.getService(this, r.id,
@@ -108,7 +127,7 @@ class RingService : Service() {
             .addAction(Notification.Action.Builder(null, "End call", dismiss).build()).build())
         wakeLock = getSystemService(PowerManager::class.java).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "callreminder:speech").apply { acquire(35_000) }
         handler.postDelayed(speechTimeout, 30_000)
-        val attributes = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ALARM)
+        val attributes = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
             .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build()
         focus = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT).setAudioAttributes(attributes)
             .setOnAudioFocusChangeListener({ change ->
@@ -119,6 +138,18 @@ class RingService : Service() {
         if (getSystemService(AudioManager::class.java).requestAudioFocus(focus!!) != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
             end("speech unavailable", false); return
         }
+        callAudio = CallAudio(this, selected = { route ->
+            if (active?.id == r.id && answering) {
+                routeReady = true
+                speakerEnabled = route == "speaker"
+                Reminders.route(this, r.id, route)
+                changed()
+                speakWhenReady()
+            }
+        }, failed = {
+            if (active?.id == r.id && answering) end("audio unavailable", false)
+        })
+        if (callAudio?.start() != true) { end("audio unavailable", false); return }
         speech = TextToSpeech(this) { status ->
             // Some engines invoke initialization synchronously; post after the instance is assigned.
             handler.post initialized@{
@@ -145,14 +176,22 @@ class RingService : Service() {
                         if (active?.id == r.id && answering) end(state, false)
                     } }
                 })
-                if (engine.speak(message, TextToSpeech.QUEUE_FLUSH, Bundle(), "reminder-${r.id}") == TextToSpeech.ERROR) end("speech unavailable", false)
+                engineReady = true
+                speakWhenReady()
             }
         }
+    }
+    private fun speakWhenReady() {
+        val r = active ?: return
+        if (!answering || !routeReady || !engineReady || speechStarted) return
+        speechStarted = true
+        if (speech?.speak(spokenMessage, TextToSpeech.QUEUE_FLUSH, Bundle(), "reminder-${r.id}") == TextToSpeech.ERROR) end("speech unavailable", false)
     }
     private fun end(state: String, missed: Boolean) {
         val r = active
         r?.let { Reminders.update(this, it.id, state) }
         active = null
+        currentId = null
         answering = false
         release()
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -170,6 +209,8 @@ class RingService : Service() {
         handler.removeCallbacks(timeout)
         handler.removeCallbacks(speechTimeout)
         speech?.stop(); speech?.shutdown(); speech = null
+        callAudio?.close(); callAudio = null
+        speechStarted = false; routeReady = false; engineReady = false; speakerEnabled = false
         focus?.let { getSystemService(AudioManager::class.java).abandonAudioFocusRequest(it) }; focus = null
         player?.release(); player = null
         vibrator?.cancel(); vibrator = null
@@ -178,6 +219,7 @@ class RingService : Service() {
     override fun onDestroy() {
         active?.let { Reminders.update(this, it.id, "stopped") }
         active = null
+        currentId = null
         release()
         sendBroadcast(Intent("com.sriram.callreminder.STATE").setPackage(packageName))
         super.onDestroy()

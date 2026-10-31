@@ -61,7 +61,7 @@ class ReminderTest {
         Reminders.cancel(context)
         assertTrue(Reminders.all(context).isEmpty())
     }
-    @Test fun lockedScreenSwipeAnswersSpeaksAndSecondTimesOut() {
+    @Test fun lockedScreenSwipeUsesPrivateAudioAndSecondTimesOut() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         var monitor = instrumentation.addMonitor(ReminderActivity::class.java.name, null, false)
         try {
@@ -84,8 +84,13 @@ class ReminderTest {
                 val swipe = first!!.findViewById<android.view.View>(android.R.id.content).findViewWithTag<SwipeAnswerView>("answer_swipe")
                 swipe(swipe, 1f, false)
             }
-            waitFor(25_000) { Reminders.all(context)[0].state in setOf("answered", "speech unavailable") }
-            assertEquals("Speech engine must finish the spoken reminder", "answered", Reminders.all(context)[0].state)
+            waitFor(25_000) { Reminders.all(context)[0].state in setOf("answered", "speech unavailable", "audio unavailable") }
+            val privateAudio = context.getSystemService(android.media.AudioManager::class.java).availableCommunicationDevices
+                .any { it.type == android.media.AudioDeviceInfo.TYPE_BUILTIN_EARPIECE }
+            val expected = if (privateAudio) "answered" else "audio unavailable"
+            assertEquals("Use earpiece or fail without loudspeaker fallback", expected, Reminders.all(context)[0].state)
+            if (privateAudio) assertEquals("earpiece", Reminders.all(context)[0].audioRoute)
+            else instrumentation.runOnMainSync { first!!.finish() }
             assertTrue(Reminders.all(context)[0].spokenText.startsWith("You have a call, Your test meeting, to join in "))
             waitFor { first!!.isDestroyed }
             assertEquals("scheduled", Reminders.all(context)[1].state)
@@ -95,7 +100,7 @@ class ReminderTest {
             assertNotNull("Second alarm should still open after dismissing the first", second)
             assertEquals("ringing", Reminders.all(context)[1].state)
             waitFor(35_000) { Reminders.all(context)[1].state == "missed" }
-            assertEquals("answered", Reminders.all(context)[0].state)
+            assertEquals(expected, Reminders.all(context)[0].state)
         } finally { instrumentation.removeMonitor(monitor) }
     }
     @Test fun swipeCancellationAndAccessibilityActivation() {
@@ -163,7 +168,7 @@ class ReminderTest {
             screenshot.recycle()
             shell("input tap 770 865")
             assertNotNull("Notification Answer must open the call screen directly", monitor.waitForActivityWithTimeout(10_000))
-            waitFor { Reminders.all(context)[0].state in setOf("answering", "speaking", "answered") }
+            waitFor { Reminders.all(context)[0].state in setOf("answering", "speaking", "answered", "audio unavailable") }
             assertEquals("scheduled", Reminders.all(context)[1].state)
         } finally { instrumentation.removeMonitor(monitor) }
     }

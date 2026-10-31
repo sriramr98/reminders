@@ -10,6 +10,7 @@ import android.widget.*
 class ReminderActivity : BaseActivity() {
     private var reminderId = -1
     private var renderedState = ""
+    private var renderedReminder: Reminder? = null
     private val handler = Handler(Looper.getMainLooper())
     private var connectedAt = 0L
     private var status: TextView? = null
@@ -29,13 +30,14 @@ class ReminderActivity : BaseActivity() {
         super.onCreate(state)
         setShowWhenLocked(true); setTurnScreenOn(true)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        volumeControlStream = android.media.AudioManager.STREAM_VOICE_CALL
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(changes, IntentFilter("com.sriram.callreminder.STATE"), RECEIVER_NOT_EXPORTED)
         else @Suppress("UnspecifiedRegisterReceiverFlag") registerReceiver(changes, IntentFilter("com.sriram.callreminder.STATE"))
         render()
         answerIfRequested()
     }
     override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent); setIntent(intent); renderedState = ""; render(); answerIfRequested()
+        super.onNewIntent(intent); setIntent(intent); renderedState = ""; renderedReminder = null; render(); answerIfRequested()
     }
     private fun answerIfRequested() {
         if (intent.action != "answer") return
@@ -49,11 +51,13 @@ class ReminderActivity : BaseActivity() {
         reminderId = intent.getIntExtra("id", -1)
         val r = Reminders.all(this).firstOrNull { it.id == reminderId }
         if (r == null || r.state in setOf("dismissed", "missed", "stopped", "interrupted by next reminder")) { finish(); return }
-        if (renderedState == r.state) return
+        if (renderedReminder == r) return
         if (r.state == "scheduled") { finish(); return }
         renderedState = r.state
+        renderedReminder = r
         handler.removeCallbacks(timer)
         val ringing = r.state == "ringing"
+        volumeControlStream = if (ringing) android.media.AudioManager.STREAM_ALARM else android.media.AudioManager.STREAM_VOICE_CALL
         val speaking = r.state in setOf("answering", "speaking")
         if (speaking && connectedAt == 0L) connectedAt = SystemClock.elapsedRealtime()
         val root = LinearLayout(this).apply {
@@ -74,9 +78,13 @@ class ReminderActivity : BaseActivity() {
                 ringing -> "Incoming meeting call"
                 speaking -> "Connecting…"
                 r.state == "speech unavailable" -> "Voice unavailable"
+                r.state == "audio unavailable" -> "Call audio unavailable"
                 else -> "Call ended"
             }, 16f).apply { gravity = Gravity.CENTER; setTextColor(Color.rgb(167, 190, 188)) }
-            text(r.title, 34f).apply { gravity = Gravity.CENTER; setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL)) }
+            text(r.title, 34f).apply {
+                gravity = Gravity.CENTER; maxLines = 3; ellipsize = android.text.TextUtils.TruncateAt.END
+                setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL))
+            }
             text("${if (r.test) "Test meeting" else "Meeting"}  ·  ${clock(r.meetingAt)}", 15f).gravity = Gravity.CENTER
             addView(Space(this@ReminderActivity), LinearLayout.LayoutParams(1, 0, 1f))
             val avatar = TextView(this@ReminderActivity).apply {
@@ -94,7 +102,8 @@ class ReminderActivity : BaseActivity() {
                     avatar.animate().scaleX(1f).scaleY(1f).setDuration(900).start()
                 }.start()
             } else {
-                text(if (r.state == "speech unavailable") "Install an English voice in Android’s text-to-speech settings to hear reminders."
+                text(if (r.state == "audio unavailable") "The earpiece or selected call audio is unavailable. Check your audio settings."
+                    else if (r.state == "speech unavailable") "Install an English voice in Android’s text-to-speech settings to hear reminders."
                     else r.spokenText.ifEmpty { Announcement.text(r, System.currentTimeMillis()) }, 18f).apply {
                     gravity = Gravity.CENTER; setPadding(0, dp(24), 0, 0)
                 }
@@ -117,10 +126,23 @@ class ReminderActivity : BaseActivity() {
                 val skip = TextView(this@ReminderActivity).apply {
                     setText(R.string.skip_both); gravity = Gravity.CENTER; textSize = 14f
                     setTextColor(Color.rgb(167, 190, 188)); setPadding(dp(8), dp(12), dp(8), dp(12))
-                    setOnClickListener { Reminders.cancel(this@ReminderActivity); finish() }
+                    setOnClickListener { Reminders.skipOccurrence(this@ReminderActivity, reminderId); finish() }
                 }
                 addView(skip, LinearLayout.LayoutParams(-1, dp(48)))
             } else {
+                if (CalendarEvents.safeUrl(r.joinUrl).isNotEmpty()) button("Join meeting", true) {
+                    MeetingLinks.open(this@ReminderActivity, r.joinUrl) { if (speaking) command("dismiss") }
+                }
+                if (speaking) {
+                    text(when (r.audioRoute) {
+                        "earpiece" -> "Audio through earpiece · hold phone to your ear"
+                        "speaker" -> "Speaker is on"
+                        else -> "Preparing earpiece…"
+                    }, 14f, true).gravity = Gravity.CENTER
+                    button(if (r.audioRoute == "speaker") "Speaker · on" else "Speaker · off", r.audioRoute == "speaker") {
+                        command("toggle_speaker")
+                    }.apply { tag = "speaker_toggle"; isEnabled = r.audioRoute.isNotEmpty() }
+                }
                 button(if (speaking) "End call" else "Close") {
                     if (speaking) command("dismiss") else finish()
                 }.apply {
@@ -131,7 +153,7 @@ class ReminderActivity : BaseActivity() {
             }
         }
         if (speaking) handler.post(timer)
-        if (r.state == "answered") handler.postDelayed({ if (renderedState == "answered") finish() }, 1800)
+        if (r.state == "answered" && r.joinUrl.isEmpty()) handler.postDelayed({ if (renderedState == "answered") finish() }, 1800)
     }
     override fun onDestroy() { handler.removeCallbacksAndMessages(null); unregisterReceiver(changes); super.onDestroy() }
 }

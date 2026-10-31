@@ -28,7 +28,12 @@ object CallPresentation {
 }
 
 open class BaseActivity : Activity() {
-    override fun onResume() { super.onResume(); CallPresentation.resumed(this) }
+    override fun onResume() {
+        super.onResume()
+        window.insetsController?.setSystemBarsAppearance(0,
+            WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS)
+        CallPresentation.resumed(this)
+    }
     override fun onPause() { CallPresentation.paused(this); super.onPause() }
     protected val mint = Color.rgb(136, 224, 194)
     protected val white = Color.rgb(237, 245, 243)
@@ -73,7 +78,10 @@ class MainActivity : BaseActivity() {
     }
     override fun onResume() {
         super.onResume()
+        CalendarStore.restore(this)
         Reminders.restore(this)
+        CalendarRefresh.schedule(this)
+        CalendarRefresh.refreshSoon(this)
         render()
         Reminders.all(this).firstOrNull { it.state in setOf("ringing", "answering", "speaking") }
             ?.let { CallPresentation.show(this, it.id) }
@@ -96,6 +104,13 @@ class MainActivity : BaseActivity() {
             text("CALL REMINDER  /  PROTOTYPE", 12f, true)
             text("A meeting reminder\nyou can’t overlook.", 30f).setTypeface(null, Typeface.BOLD)
             text("Two calls. One meeting. Swipe to answer and hear your reminder. The second call still rings.")
+            text("Google Calendar", 22f, true)
+            val calendarSession = CalendarStore.session(this@MainActivity)
+            text(if (calendarSession.account.isEmpty()) "Connect your account and choose which calendars should ring." else
+                "${calendarSession.account} · ${calendarSession.selected.size} calendars selected", 14f)
+            button(if (calendarSession.account.isEmpty()) "Connect Google Calendar" else "Calendar & upcoming meetings", true) {
+                startActivity(Intent(this@MainActivity, CalendarActivity::class.java))
+            }
             text("Ready to ring", 20f, true)
             if (!notifications()) button("Enable notifications") {
                 if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
@@ -110,7 +125,7 @@ class MainActivity : BaseActivity() {
             text("Calls ring in 10 and 50 seconds. The swipe screen opens here or over the lock screen. While using another app, use Answer in the incoming-call banner. Each unanswered call rings for up to 30 seconds.", 14f)
             button("Start two test calls", true) { runTest(true) }.isEnabled = notifications() && Reminders.canSchedule(this@MainActivity)
             button("Schedule sample meeting in 20 min") { runTest(false) }.isEnabled = notifications() && Reminders.canSchedule(this@MainActivity)
-            val reminders = Reminders.all(this@MainActivity)
+            val reminders = Reminders.all(this@MainActivity).filter { it.sourceKey.isEmpty() }
             if (reminders.isNotEmpty()) {
                 text("${reminders.first().title} · ${clock(reminders.first().meetingAt)}", 18f, true)
                 reminders.forEach { r ->
@@ -119,9 +134,9 @@ class MainActivity : BaseActivity() {
                         startActivity(Intent(this@MainActivity, ReminderActivity::class.java).putExtra("id", r.id))
                     }
                 }
-                button("Cancel both reminders") { Reminders.cancel(this@MainActivity); render() }
+                button("Cancel sample reminders") { Reminders.cancelSamples(this@MainActivity); render() }
             }
-            text("Calendar connection comes next. These sample meetings stay on this device. Alarm volume and Do Not Disturb settings affect audibility.", 13f)
+            text("Sample calls are separate from your synced meetings. Alarm volume and Do Not Disturb settings affect ringing.", 13f)
         }
     }
 }
