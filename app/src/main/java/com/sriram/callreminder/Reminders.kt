@@ -6,16 +6,17 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 data class Reminder(val id: Int, val title: String, val meetingAt: Long, val fireAt: Long,
-                    val leadMinutes: Int, val test: Boolean, val state: String = "scheduled", val spokenText: String = "",
-                    val audioRoute: String = "", val sourceKey: String = "", val calendarId: String = "", val joinUrl: String = "") {
-    val sequence get() = if (leadMinutes == 15) 1 else 2
+                    val leadMinutes: Int, val test: Boolean, val state: String = "scheduled",
+                    val sourceKey: String = "", val calendarId: String = "", val joinUrl: String = "") {
     fun json() = JSONObject().put("id", id).put("title", title).put("meetingAt", meetingAt)
-        .put("fireAt", fireAt).put("leadMinutes", leadMinutes).put("test", test).put("state", state).put("spokenText", spokenText)
-        .put("audioRoute", audioRoute).put("sourceKey", sourceKey).put("calendarId", calendarId).put("joinUrl", joinUrl)
+        .put("fireAt", fireAt).put("leadMinutes", leadMinutes).put("test", test).put("state", state)
+        .put("sourceKey", sourceKey).put("calendarId", calendarId).put("joinUrl", joinUrl)
     companion object {
         fun read(o: JSONObject) = Reminder(o.getInt("id"), o.getString("title"), o.getLong("meetingAt"),
-            o.getLong("fireAt"), o.getInt("leadMinutes"), o.getBoolean("test"), o.getString("state"), o.optString("spokenText"),
-            o.optString("audioRoute"), o.optString("sourceKey"), o.optString("calendarId"), o.optString("joinUrl"))
+            o.getLong("fireAt"), o.getInt("leadMinutes"), o.getBoolean("test"),
+            // Old speech states are terminal after upgrading; obsolete audio fields are ignored.
+            o.getString("state").let { if (it in setOf("answering", "speaking", "answered", "speech unavailable", "audio unavailable")) "dismissed" else it },
+            o.optString("sourceKey"), o.optString("calendarId"), o.optString("joinUrl"))
     }
 }
 
@@ -30,10 +31,21 @@ object Reminders {
         check(prefs(c).edit().putInt("nextId", id + 1).commit())
         return id
     }
-    @Synchronized fun update(c: Context, id: Int, state: String, spokenText: String? = null) = save(c, all(c).map {
-        if (it.id == id && it.state != "skipped") it.copy(state = state, spokenText = spokenText ?: it.spokenText) else it
+    @Synchronized fun update(c: Context, id: Int, state: String) = save(c, all(c).map {
+        if (it.id == id && it.state != "skipped") it.copy(state = state) else it
     })
-    @Synchronized fun route(c: Context, id: Int, route: String) = save(c, all(c).map { if (it.id == id) it.copy(audioRoute = route) else it })
+    fun sameOccurrence(a: Reminder, b: Reminder) = if (a.sourceKey.isNotEmpty()) a.sourceKey == b.sourceKey
+        else b.sourceKey.isEmpty() && a.meetingAt == b.meetingAt
+    @Synchronized fun isFinal(c: Context, r: Reminder) = all(c).none { sameOccurrence(it, r) && it.fireAt > r.fireAt }
+    @Synchronized fun nextScheduled(c: Context, r: Reminder) = all(c)
+        .filter { sameOccurrence(it, r) && it.fireAt > r.fireAt && it.state == "scheduled" }.minByOrNull { it.fireAt }
+    /** User dismissal only silences this alert; it never changes attendance. */
+    @Synchronized fun dismiss(c: Context, id: Int) {
+        val r = all(c).firstOrNull { it.id == id && it.state in setOf("ringing", "missed") } ?: return
+        update(c, id, "dismissed")
+        cancelAlarms(c, listOf(r))
+        changed(c)
+    }
     fun times(meetingAt: Long) = listOf(15, 2).map { it to meetingAt - it * 60_000L }
     fun canSchedule(c: Context) = c.getSystemService(AlarmManager::class.java).canScheduleExactAlarms()
     private fun pending(c: Context, r: Reminder) = PendingIntent.getBroadcast(c, r.id,
@@ -74,7 +86,7 @@ object Reminders {
     @Synchronized fun skipOccurrence(c: Context, id: Int) {
         val previous = all(c)
         val target = previous.firstOrNull { it.id == id } ?: return
-        val group = previous.filter { if (target.sourceKey.isEmpty()) it.sourceKey.isEmpty() else it.sourceKey == target.sourceKey }
+        val group = previous.filter { sameOccurrence(target, it) }
         save(c, previous.map { if (it in group) it.copy(state = "skipped") else it })
         cancelAlarms(c, group)
         changed(c)

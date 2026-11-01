@@ -16,8 +16,8 @@ import java.text.DateFormat
 import java.util.Date
 import java.lang.ref.WeakReference
 
-/** Only a visibly resumed activity may open the call screen directly. */
-object CallPresentation {
+/** Only a visibly resumed activity may open the reminder screen directly. */
+object ReminderPresentation {
     private var resumed = WeakReference<Activity>(null)
     fun resumed(activity: Activity) { resumed = WeakReference(activity) }
     fun paused(activity: Activity) { if (resumed.get() === activity) resumed.clear() }
@@ -32,9 +32,9 @@ open class BaseActivity : Activity() {
         super.onResume()
         window.insetsController?.setSystemBarsAppearance(0,
             WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS)
-        CallPresentation.resumed(this)
+        ReminderPresentation.resumed(this)
     }
-    override fun onPause() { CallPresentation.paused(this); super.onPause() }
+    override fun onPause() { ReminderPresentation.paused(this); super.onPause() }
     protected val mint = Color.rgb(136, 224, 194)
     protected val white = Color.rgb(237, 245, 243)
     protected fun dp(n: Int) = (n * resources.displayMetrics.density).toInt()
@@ -83,8 +83,8 @@ class MainActivity : BaseActivity() {
         CalendarRefresh.schedule(this)
         CalendarRefresh.refreshSoon(this)
         render()
-        Reminders.all(this).firstOrNull { it.state in setOf("ringing", "answering", "speaking") }
-            ?.let { CallPresentation.show(this, it.id) }
+        Reminders.all(this).firstOrNull { it.state == "ringing" && it.id == RingService.currentId }
+            ?.let { ReminderPresentation.show(this, it.id) }
     }
     override fun onDestroy() { unregisterReceiver(changes); super.onDestroy() }
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
@@ -101,9 +101,9 @@ class MainActivity : BaseActivity() {
     private fun render() {
         val root = column()
         with(root) {
-            text("CALL REMINDER  /  PROTOTYPE", 12f, true)
+            text("MEETING REMINDERS", 12f, true)
             text("A meeting reminder\nyou can’t overlook.", 30f).setTypeface(null, Typeface.BOLD)
-            text("Two calls. One meeting. Swipe to answer and hear your reminder. The second call still rings.")
+            text("Ringing reminders with your meeting details. Dismiss one alert to keep the next, or choose Not attending to stop reminders for that meeting.")
             text("Google Calendar", 22f, true)
             val calendarSession = CalendarStore.session(this@MainActivity)
             text(if (calendarSession.account.isEmpty()) "Connect your account and choose which calendars should ring." else
@@ -122,21 +122,21 @@ class MainActivity : BaseActivity() {
             if (!fullScreen()) button("Allow full-screen reminders") { settings(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT) }
             else text("✓ Full-screen reminders enabled", 14f)
             text("Quick test", 22f, true)
-            text("Calls ring in 10 and 50 seconds. The swipe screen opens here or over the lock screen. While using another app, use Answer in the incoming-call banner. Each unanswered call rings for up to 30 seconds.", 14f)
-            button("Start two test calls", true) { runTest(true) }.isEnabled = notifications() && Reminders.canSchedule(this@MainActivity)
+            text("Test reminders ring in 10 and 50 seconds, for up to 30 seconds each. Meeting details open here or on the lock screen when allowed. While using another app, use the reminder notification. There is no spoken playback.", 14f)
+            button("Start two test reminders", true) { runTest(true) }.isEnabled = notifications() && Reminders.canSchedule(this@MainActivity)
             button("Schedule sample meeting in 20 min") { runTest(false) }.isEnabled = notifications() && Reminders.canSchedule(this@MainActivity)
             val reminders = Reminders.all(this@MainActivity).filter { it.sourceKey.isEmpty() }
             if (reminders.isNotEmpty()) {
                 text("${reminders.first().title} · ${clock(reminders.first().meetingAt)}", 18f, true)
                 reminders.forEach { r ->
-                    text("${if (r.test) "Test call ${r.sequence}" else "${r.leadMinutes} min before"} · ${clock(r.fireAt)}\n${r.state}", 15f)
+                    text("${if (r.test) "Test reminder" else "${r.leadMinutes} min before"} · ${clock(r.fireAt)}\n${r.state}", 15f)
                     if (r.state == "ringing") button("Open ringing reminder") {
                         startActivity(Intent(this@MainActivity, ReminderActivity::class.java).putExtra("id", r.id))
                     }
                 }
                 button("Cancel sample reminders") { Reminders.cancelSamples(this@MainActivity); render() }
             }
-            text("Sample calls are separate from your synced meetings. Alarm volume and Do Not Disturb settings affect ringing.", 13f)
+            text("Sample reminders are separate from your synced meetings. Alarm volume and Do Not Disturb settings affect ringing.", 13f)
         }
     }
 }

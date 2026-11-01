@@ -1,26 +1,25 @@
 package com.sriram.callreminder
 
 import android.content.*
-import android.graphics.*
+import android.graphics.Color
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.*
 import android.view.*
-import android.widget.*
+import android.widget.TextView
+import java.text.DateFormat
+import java.util.Date
 
+/** Information-first alarm screen, also used by the notification's browser action. */
 class ReminderActivity : BaseActivity() {
     private var reminderId = -1
-    private var renderedState = ""
     private var renderedReminder: Reminder? = null
+    private var timing: TextView? = null
     private val handler = Handler(Looper.getMainLooper())
-    private var connectedAt = 0L
-    private var status: TextView? = null
-    private val timer = object : Runnable {
+    private val tick = object : Runnable {
         override fun run() {
-            if (renderedState in setOf("answering", "speaking")) {
-                val seconds = (SystemClock.elapsedRealtime() - connectedAt) / 1000
-                status?.text = getString(R.string.connected_time, seconds / 60, seconds % 60)
-                handler.postDelayed(this, 1000)
-            }
+            renderedReminder?.let { timing?.text = ReminderInfo.remaining(it.meetingAt, System.currentTimeMillis()) }
+            handler.postDelayed(this, 1000)
         }
     }
     private val changes = object : BroadcastReceiver() {
@@ -29,131 +28,64 @@ class ReminderActivity : BaseActivity() {
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
         setShowWhenLocked(true); setTurnScreenOn(true)
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        volumeControlStream = android.media.AudioManager.STREAM_VOICE_CALL
+        volumeControlStream = android.media.AudioManager.STREAM_ALARM
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(changes, IntentFilter("com.sriram.callreminder.STATE"), RECEIVER_NOT_EXPORTED)
         else @Suppress("UnspecifiedRegisterReceiverFlag") registerReceiver(changes, IntentFilter("com.sriram.callreminder.STATE"))
         render()
-        answerIfRequested()
+        openIfRequested()
     }
+    override fun onResume() { super.onResume(); render(); handler.removeCallbacks(tick); handler.post(tick) }
+    override fun onPause() { handler.removeCallbacks(tick); super.onPause() }
     override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent); setIntent(intent); renderedState = ""; renderedReminder = null; render(); answerIfRequested()
+        super.onNewIntent(intent); setIntent(intent); renderedReminder = null; render(); openIfRequested()
     }
-    private fun answerIfRequested() {
-        if (intent.action != "answer") return
-        intent.action = null // Consume once, including across activity recreation.
-        if (Reminders.all(this).any { it.id == reminderId && it.state == "ringing" }) command("answer")
+    private fun openIfRequested() {
+        if (intent.action != "open_meeting") return
+        intent.action = null
+        openMeeting()
     }
-    private fun command(action: String) {
-        startService(Intent(this, RingService::class.java).setAction(action).putExtra("id", reminderId))
+    private fun openMeeting() {
+        val r = Reminders.all(this).firstOrNull { it.id == reminderId } ?: return
+        if (!ReminderInfo.canOpenMeeting(this, r)) return
+        MeetingLinks.open(this, r.joinUrl, allowed = {
+            Reminders.all(this).firstOrNull { it.id == r.id }?.let { it.joinUrl == r.joinUrl && ReminderInfo.canOpenMeeting(this, it) } == true
+        }) { Reminders.dismiss(this, r.id); finish() }
     }
     private fun render() {
         reminderId = intent.getIntExtra("id", -1)
         val r = Reminders.all(this).firstOrNull { it.id == reminderId }
-        if (r == null || r.state in setOf("dismissed", "missed", "stopped", "interrupted by next reminder")) { finish(); return }
-        if (renderedReminder == r) return
-        if (r.state == "scheduled") { finish(); return }
-        renderedState = r.state
-        renderedReminder = r
-        handler.removeCallbacks(timer)
+        if (r == null || r.state !in setOf("ringing", "missed", "dismissed")) { finish(); return }
+        // Missed/dismissed details stay available, including the final browser action.
         val ringing = r.state == "ringing"
-        volumeControlStream = if (ringing) android.media.AudioManager.STREAM_ALARM else android.media.AudioManager.STREAM_VOICE_CALL
-        val speaking = r.state in setOf("answering", "speaking")
-        if (speaking && connectedAt == 0L) connectedAt = SystemClock.elapsedRealtime()
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(28), dp(26), dp(28), dp(30))
-            background = GradientDrawable(GradientDrawable.Orientation.TL_BR,
-                intArrayOf(Color.rgb(28, 61, 60), Color.rgb(12, 25, 29), Color.rgb(7, 15, 22)))
+        if (ringing) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        renderedReminder = r
+        with(column()) {
+            text(if (r.test) "TEST REMINDER" else "MEETING REMINDER", 12f, true).apply { letterSpacing = .15f }
+            text(if (ringing) "Your meeting is coming up" else if (r.state == "missed") "Missed reminder" else "Reminder dismissed", 18f)
+            text(r.title, 32f).apply { setTypeface(null, Typeface.BOLD); tag = "meeting_title" }
+            timing = text(ReminderInfo.remaining(r.meetingAt, System.currentTimeMillis()), 24f, true).apply {
+                tag = "meeting_remaining"
+                setPadding(0, dp(20), 0, dp(12))
+            }
+            text(DateFormat.getDateTimeInstance(DateFormat.FULL, DateFormat.SHORT).format(Date(r.meetingAt)), 17f)
+            val calendar = CalendarStore.calendars(this@ReminderActivity).firstOrNull { it.id == r.calendarId }
+            text(if (r.sourceKey.isEmpty()) "Sample meeting" else calendar?.title ?: "Google Calendar", 15f)
+            text(ReminderInfo.scheduleSummary(this@ReminderActivity, r), 15f, true)
+            if (ReminderInfo.canOpenMeeting(this@ReminderActivity, r)) button("Open meeting in browser", true) { openMeeting() }.tag = "open_meeting"
+            if (ringing) button("Dismiss this reminder", true) {
+                Reminders.dismiss(this@ReminderActivity, r.id); finish()
+            }.tag = "dismiss_reminder"
+            text("Not attending? Stop all remaining reminders for this occurrence. Your Google Calendar RSVP will not change.", 14f)
+            button("Not attending") {
+                Reminders.skipOccurrence(this@ReminderActivity, r.id); finish()
+            }.apply {
+                tag = "decline_reminder"
+                setTextColor(Color.WHITE)
+                background = GradientDrawable().apply { setColor(Color.rgb(148, 52, 65)); cornerRadius = dp(18).toFloat() }
+            }
+            if (!ringing) button("Close") { finish() }
         }
-        setContentView(root)
-        root.setOnApplyWindowInsetsListener { v, insets ->
-            val bars = insets.getInsets(WindowInsets.Type.systemBars())
-            v.setPadding(dp(28) + bars.left, dp(26) + bars.top, dp(28) + bars.right, dp(30) + bars.bottom)
-            insets
-        }
-        with(root) {
-            text("CALL REMINDER", 12f, true).apply { letterSpacing = .2f; gravity = Gravity.CENTER }
-            status = text(when {
-                ringing -> "Incoming meeting call"
-                speaking -> "Connecting…"
-                r.state == "speech unavailable" -> "Voice unavailable"
-                r.state == "audio unavailable" -> "Call audio unavailable"
-                else -> "Call ended"
-            }, 16f).apply { gravity = Gravity.CENTER; setTextColor(Color.rgb(167, 190, 188)) }
-            text(r.title, 34f).apply {
-                gravity = Gravity.CENTER; maxLines = 3; ellipsize = android.text.TextUtils.TruncateAt.END
-                setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL))
-            }
-            text("${if (r.test) "Test meeting" else "Meeting"}  ·  ${clock(r.meetingAt)}", 15f).gravity = Gravity.CENTER
-            addView(Space(this@ReminderActivity), LinearLayout.LayoutParams(1, 0, 1f))
-            val avatar = TextView(this@ReminderActivity).apply {
-                text = r.title.trim().firstOrNull()?.uppercase() ?: "M"
-                textSize = 54f; gravity = Gravity.CENTER; setTextColor(white)
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.OVAL
-                    setColor(Color.rgb(46, 83, 80)); setStroke(dp(1), Color.rgb(89, 128, 118))
-                }
-                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-            }
-            addView(avatar, LinearLayout.LayoutParams(dp(128), dp(128)))
-            if (ringing) {
-                avatar.animate().scaleX(1.04f).scaleY(1.04f).setDuration(900).withEndAction {
-                    avatar.animate().scaleX(1f).scaleY(1f).setDuration(900).start()
-                }.start()
-            } else {
-                text(if (r.state == "audio unavailable") "The earpiece or selected call audio is unavailable. Check your audio settings."
-                    else if (r.state == "speech unavailable") "Install an English voice in Android’s text-to-speech settings to hear reminders."
-                    else r.spokenText.ifEmpty { Announcement.text(r, System.currentTimeMillis()) }, 18f).apply {
-                    gravity = Gravity.CENTER; setPadding(0, dp(24), 0, 0)
-                }
-            }
-            addView(Space(this@ReminderActivity), LinearLayout.LayoutParams(1, 0, 1f))
-            if (ringing) {
-                val decline = Button(this@ReminderActivity).apply {
-                    tag = "decline_call"
-                    setText(R.string.decline); isAllCaps = false; textSize = 16f; setTextColor(Color.WHITE)
-                    background = GradientDrawable().apply { setColor(Color.rgb(189, 62, 74)); cornerRadius = dp(32).toFloat() }
-                    setOnClickListener { command("dismiss") }
-                }
-                addView(decline, LinearLayout.LayoutParams(dp(138), dp(56)).apply { bottomMargin = dp(26) })
-                val swipe = SwipeAnswerView(this@ReminderActivity).apply {
-                    tag = "answer_swipe"
-                    setOnClickListener { command("answer") }
-                }
-                addView(swipe, LinearLayout.LayoutParams(-1, dp(76)))
-                text("Swipe to hear your meeting details", 13f).apply { gravity = Gravity.CENTER; setTextColor(Color.rgb(167, 190, 188)) }
-                val skip = TextView(this@ReminderActivity).apply {
-                    setText(R.string.skip_both); gravity = Gravity.CENTER; textSize = 14f
-                    setTextColor(Color.rgb(167, 190, 188)); setPadding(dp(8), dp(12), dp(8), dp(12))
-                    setOnClickListener { Reminders.skipOccurrence(this@ReminderActivity, reminderId); finish() }
-                }
-                addView(skip, LinearLayout.LayoutParams(-1, dp(48)))
-            } else {
-                if (CalendarEvents.safeUrl(r.joinUrl).isNotEmpty()) button("Join meeting", true) {
-                    MeetingLinks.open(this@ReminderActivity, r.joinUrl) { if (speaking) command("dismiss") }
-                }
-                if (speaking) {
-                    text(when (r.audioRoute) {
-                        "earpiece" -> "Audio through earpiece · hold phone to your ear"
-                        "speaker" -> "Speaker is on"
-                        else -> "Preparing earpiece…"
-                    }, 14f, true).gravity = Gravity.CENTER
-                    button(if (r.audioRoute == "speaker") "Speaker · on" else "Speaker · off", r.audioRoute == "speaker") {
-                        command("toggle_speaker")
-                    }.apply { tag = "speaker_toggle"; isEnabled = r.audioRoute.isNotEmpty() }
-                }
-                button(if (speaking) "End call" else "Close") {
-                    if (speaking) command("dismiss") else finish()
-                }.apply {
-                    setTextColor(Color.WHITE)
-                    background = GradientDrawable().apply { setColor(Color.rgb(189, 62, 74)); cornerRadius = dp(32).toFloat() }
-                }
-                text("${if (r.sequence == 1) "Your second reminder is still scheduled." else "This was your final reminder."}", 13f).gravity = Gravity.CENTER
-            }
-        }
-        if (speaking) handler.post(timer)
-        if (r.state == "answered" && r.joinUrl.isEmpty()) handler.postDelayed({ if (renderedState == "answered") finish() }, 1800)
     }
     override fun onDestroy() { handler.removeCallbacksAndMessages(null); unregisterReceiver(changes); super.onDestroy() }
 }

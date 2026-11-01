@@ -66,14 +66,15 @@ Use an event you create yourself in Google Calendar on a selected calendar, star
 
 - Sync and verify the meeting's displayed date/time.
 - The app schedules two independent alarms at 15 and 2 minutes before its start.
-- Answer or decline the first; the second should remain scheduled.
+- Dismiss the first reminder; the second should remain scheduled. Separately test **Not attending**: it must cancel all remaining reminders for that occurrence without changing your Calendar RSVP.
 - Change the start time in Google Calendar, sync, and confirm that the old alarm IDs are replaced.
-- Delete/cancel the event, sync, and confirm that its pending calls disappear.
+- Delete/cancel the event, sync, and confirm that its pending reminders disappear.
 - Check a recurring meeting, a moved occurrence, an all-day event, and a declined invitation.
-- Tap **Skip both reminders** for one occurrence; a subsequent sync must not restore its calls, and other meetings must remain armed.
-- Disconnect Calendar and verify that its meetings/reminders are removed while sample test calls remain independent.
+- Tap **Not attending** for one occurrence; a subsequent sync must not restore its reminders, and other meetings must remain armed.
+- On the final reminder, verify **Open meeting in browser** appears when a valid link exists, requests unlocking when locked, and opens a browser. No link means no button; no spoken feedback is used.
+- Disconnect Calendar and verify that its meetings/reminders are removed while sample test reminders remain independent.
 
-The repository's automated tests exercise these reconciliation rules with fixtures. Live account authorization, real Google responses, and on-phone Calendar reminders require this setup and have not yet been verified.
+The repository's automated tests exercise these reconciliation rules with fixtures. The owner has successfully tested the Calendar integration with a real account. Other users/signing configurations and the new ringing-only reminder presentation still need validation.
 
 ## Sync behavior and limits
 
@@ -91,4 +92,4 @@ Access tokens are kept in memory for API calls and managed by Google Play servic
 - **HTTP 403:** verify Calendar API is enabled and that the account may read the selected calendars.
 - **Needs attention / expired access:** tap **Reconnect / sync now**. Failed syncs retain the previous schedule and show the last successful sync time.
 - **No events:** check calendar selection, timed starts in the next seven days, declined status, and whether the event is a meeting rather than focus time, working location, or an all-day entry.
-- **No calls despite visible meetings:** enable precise alarms and notifications. A meeting synced after an offset has passed only gets the remaining future offsets.
+- **No reminders despite visible meetings:** enable precise alarms and notifications. A meeting synced after an offset has passed only gets the remaining future offsets.
