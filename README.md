@@ -1,72 +1,103 @@
 # Call Reminder
 
-Native Android meeting alarms with read-only Google Calendar access. Reminders **ring, vibrate, and show meeting information**—there are no telephone calls, spoken announcements, or call-audio routing.
+An Android app that turns Google Calendar meetings into ringing reminders. It shows meeting details on a full-screen alarm or notification, with a shortcut to open the meeting link when it is time to join.
 
-Calendar integration has been tested successfully with the owner's real account. New accounts/build signing certificates still require the [Google Cloud setup](docs/google-calendar-setup.md). See the [shareable-app readiness tracker](docs/shareable-app-readiness.md) for remaining release work.
+Reminders are scheduled locally, so they can ring without an internet connection. Google Calendar access is read-only; dismissing or declining a reminder never changes the event or your RSVP.
 
-## Run
+## Features
 
-Open this folder in Android Studio, or use JDK 17+ and an installed Android SDK:
+- Choose which Google calendars generate reminders.
+- Receive alarms **15 minutes and 2 minutes before** each meeting.
+- View the meeting title, date, time, calendar, and live countdown.
+- Dismiss an individual alert, or select **Not attending** to cancel the remaining reminders for that occurrence.
+- Open the meeting link in a browser from the final reminder.
+- Sync recurring meetings and calendar changes, with duplicate occurrences resolved across selected calendars.
+- Try sample reminders without connecting a calendar.
+
+## How it works
+
+The app syncs the next seven days of timed events from selected calendars. Cancelled events, declined invitations, all-day entries, and special event types such as focus time are excluded.
+
+Each meeting gets two independent alarms. **Dismiss** silences the current alert while leaving the next one scheduled. **Not attending** suppresses all reminders for that occurrence, including after a sync; other occurrences in a recurring series are unaffected.
+
+Alerts ring and vibrate for up to 30 seconds. When the app is open, meeting details appear directly. On a locked device, Android can show the full-screen reminder; while using another app, an actionable notification is available instead. Unhandled alerts leave a missed-reminder notification.
+
+The final reminder includes **Open meeting in browser** when a valid meeting link is available. Opening the link requires unlocking the device and silences the alert. There are no telephone calls or spoken announcements.
+
+## Getting started
+
+### Requirements
+
+- Android 12 or later (API 31+).
+- Google Play services and a Google account for Calendar integration.
+- Android Studio, or JDK 17+ with the Android SDK, to build from source.
+
+### Build and install
+
+Open the repository in Android Studio, or configure `ANDROID_HOME` / `sdk.dir` in `local.properties` and run:
 
 ```sh
 ./gradlew :app:assembleDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Set `sdk.dir` in your own `local.properties` or configure `ANDROID_HOME`. The project uses AGP 9.0.1, Gradle 9.1.0, compile/target SDK 36, and Android 12+ (API 31).
+The project targets Android SDK 36 and uses Android Gradle Plugin 9.0.1 and Gradle 9.1.0.
 
-## Reminder experience
+### Connect Calendar
 
-Enable notifications, alarms & reminders, and full-screen reminders using the home-screen setup buttons. Connect Google Calendar and choose calendars. The app syncs a seven-day window and schedules reminders **15 and 2 minutes before** each eligible occurrence. Configurable intervals/counts remain follow-up work.
+Google Calendar authorization requires a Google Cloud project with the Calendar API enabled and an Android OAuth client registered for the app's package and signing certificate. Follow the [Google Calendar setup guide](docs/google-calendar-setup.md) before connecting an account from a locally built APK.
 
-- **Dismiss this reminder** stops only this alert, leaving later reminders scheduled.
-- **Not attending** stops this alert and cancels all remaining reminders for the same occurrence. This stays suppressed across resync and moving that occurrence; it does **not** change your Google Calendar RSVP or suppress the recurring series.
-- The **final reminder** offers **Open meeting in browser** if a valid HTTPS meeting link exists. It opens a browser, not a meeting-app deep-link handler, and requests unlocking first when needed. Successful launch silences the current alert. If no browser is available, an error is shown and the reminder remains available.
-- Unhandled alerts ring for at most **30 seconds**, then leave a missed-reminder notification. Missed reminders retain meeting details/actions, including the final browser button. Timing out never means “not attending.”
+In the app:
 
-The details screen shows the meeting title, date/time, live remaining time, calendar, and next-reminder/final-reminder information. There is no swipe-to-answer, connected timer, speech engine, earpiece routing, or Speaker toggle.
+1. Enable notifications and precise alarms. Allow full-screen reminders for lock-screen presentation.
+2. Select **Connect Google Calendar** and grant the read-only permissions.
+3. Choose calendars and apply the selection. The primary calendar is selected by default.
+4. Use **Sync now** to refresh meetings manually.
 
-### Presentation
+### Try a reminder
 
-- **App open:** opens the meeting reminder screen directly with a quiet foreground notification.
-- **Locked/asleep:** Android opens the full-screen reminder when system settings allow it.
-- **Using another app:** an alarm-style notification provides Dismiss / Not attending and, on the final reminder when linked, Open meeting in browser. Tap its body for details.
+**Start two test reminders** schedules alerts after 10 and 50 seconds. Dismiss the first to receive both, or choose **Not attending** to cancel the pair.
 
-Full-screen access does not guarantee an overlay over another app while unlocked. Notification previews use private visibility with a generic public version; the full-screen reminder itself displays meeting information. Additional lock-screen privacy controls remain tracked release work.
+**Schedule sample meeting in 20 min** uses the normal offsets, ringing after 5 and 18 minutes. Samples have no meeting links and do not affect Calendar reminders.
 
-Ringing follows alarm volume, DND, and system/manufacturer restrictions. No volume levels or communication audio routes are changed. Force-stop prevents alarms until reopening; powered-off devices and battery controls can prevent delivery. Currently a newly arriving reminder replaces an already ringing one; broader collision-policy work is tracked.
+## Sync and delivery limitations
 
-### Sample reminders
+- Background sync is requested every 15 minutes. Android may delay it, so last-minute calendar changes may not arrive before an alarm. Opening the home screen also requests a refresh, throttled to five minutes.
+- Failed syncs retain the previous schedule. Already elapsed reminder offsets are not triggered retroactively.
+- Full-screen presentation depends on Android permissions and device state; it is not a guaranteed overlay while another app is open.
+- Alarm volume, Do Not Disturb, and manufacturer battery restrictions affect delivery. Force-stopping the app prevents reminders until it is reopened.
+- Only one reminder rings at a time; a new alert replaces an active one.
+- Reminder intervals are currently fixed at 15 and 2 minutes.
 
-**Start two test reminders** rings after 10 and 50 seconds. Dismiss the first to test both, or choose Not attending to cancel the pair. **Schedule sample meeting in 20 min** uses the real 15-/2-minute offsets and rings in 5 and 18 minutes. Samples have no real meeting link and are isolated from Calendar reminders. Starting a new sample replaces the previous sample pair.
+## Privacy
 
-## Implementation
+Calendar metadata and reminder state are stored privately on the device, with backup and transfer disabled. Access tokens are managed through Google Play services and are not persisted by the app. No backend is required.
 
-- `Reminders`: private JSON persistence, independent exact `AlarmManager.setAlarmClock` alarms, stable occurrence identity, cancellation/suppression, and restoration after reboot/time changes. Old stored speech states migrate to dismissed; obsolete speech/audio fields are ignored.
-- `AlarmReceiver`: claims a scheduled reminder and starts `RingService`.
-- `RingService`: alarm-category, expanded-text notifications, full-screen intents, bounded ringtone/vibration/wake locks, timeout, and cleanup. `ReminderActionReceiver` handles dismissal and occurrence suppression even after the service times out.
-- `ReminderActivity` / `ReminderInfo`: scrollable information-first screen, live timing, accessible buttons, and final-reminder link eligibility.
-- `MeetingLinks`: safe HTTPS links, browser-only targets, unlock gating, and launch-error handling.
-- `MainActivity` / `ReminderPresentation`: permission readiness, sample controls/status, and visible-activity presentation.
-- `CalendarActivity` / `GoogleCalendarAuth`: account picker, Google consent, calendar selection, manual sync, meetings, and disconnect/revocation.
-- `CalendarApi` / `CalendarEvents`: paginated read-only REST requests, recurring occurrences, filtering, deduplication, and link extraction.
-- `CalendarStore` / `CalendarSync` / `CalendarRefresh`: private cache, complete-snapshot reconciliation, stale-response generation checks, and WorkManager refresh.
+Disconnecting Calendar removes its cached meetings and reminders and attempts to revoke Google access. Notification previews use private visibility, but the full-screen reminder displays meeting details on the lock screen when enabled.
 
-Uses native Android Views, not Compose. No backend, API key, client secret, microphone, telephone permission, or TTS voice installation is required.
+## Development
 
-## Calendar sync
+The app is written in Kotlin using native Android Views.
 
-All pages of each selected calendar's seven-day window must succeed before replacing the schedule. Cancelled, declined, all-day, and non-default event types are excluded. Failed fetches preserve cached alarms. Dismissed alerts stay dismissed on unchanged occurrences; moved meetings receive replacement alarm IDs. Elapsed offsets are never fired immediately during a late sync.
+| Component | Responsibility |
+| --- | --- |
+| `MainActivity`, `CalendarActivity` | Setup, calendar selection, upcoming meetings, and sample reminders |
+| `GoogleCalendarAuth`, `CalendarApi` | Read-only authorization and paginated Calendar API requests |
+| `CalendarStore`, `CalendarSync`, `CalendarRefresh` | Local cache, snapshot reconciliation, and WorkManager refresh |
+| `Reminders` | Persistent alarm state, occurrence suppression, scheduling, and restoration |
+| `RingService`, `ReminderActionReceiver` | Ringing, vibration, notifications, timeouts, and notification actions |
+| `ReminderActivity`, `ReminderInfo`, `MeetingLinks` | Meeting details, countdown, and browser navigation |
 
-Background refresh is requested every 15 minutes with network access. App-open requests are throttled to five minutes. Android can delay refresh, so last-minute additions/edits may arrive late; saved alarms work offline. Disconnect removes local Calendar meetings/reminders and attempts to revoke access, while leaving samples independent.
-
-## Verification
+### Build checks and tests
 
 ```sh
+# Build app and instrumentation APKs, and run lint
 ./gradlew :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug
+
+# Run instrumentation tests on a connected device or emulator
 ./gradlew :app:connectedDebugAndroidTest
 ```
 
-Instrumentation coverage includes scheduler offsets, displayed-time boundaries, legacy speech-state migration, dismiss versus decline, stale IDs, final-reminder link visibility, late sync, missed-notification actions, foreground/background/lock-screen presentation, and unchanged communication audio mode. Calendar tests cover parsing, pagination, reconciliation, failed snapshots, and stale responses.
+Tests cover Calendar parsing and reconciliation, alarm scheduling, dismissal and suppression, reminder presentation, notification actions, and meeting links.
 
-For this ringing-only revision, app/test APK compilation and lint have passed. Instrumentation execution and physical-device behavior still need validation; the previous call-style/TTS hardware checks do not validate the new presentation. No Android device/emulator was available in the implementation environment.
+See the [readiness tracker](docs/shareable-app-readiness.md) for planned refinements and release requirements.
