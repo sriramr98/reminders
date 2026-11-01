@@ -120,7 +120,7 @@ class CalendarActivity : BaseActivity() {
         with(column()) {
             text("GOOGLE CALENDAR", 12f, true)
             text("Your meetings,\nready to ring.", 30f)
-            text("Read-only access. Choose calendars and receive calls 15 and 2 minutes before timed meetings. Cancelled, declined, and all-day events are excluded.", 15f)
+            text("Read-only access. Choose calendars and receive ringing reminders 15 and 2 minutes before timed meetings. Cancelled, declined, and all-day events are excluded.", 15f)
             if (message.isNotEmpty()) text(message, 15f, true)
             if (session.account.isEmpty()) {
                 button(if (busy) "Connecting…" else "Connect Google Calendar", true) { chooseAccount() }.isEnabled = !busy
@@ -150,11 +150,11 @@ class CalendarActivity : BaseActivity() {
                 if (!Reminders.canSchedule(this@CalendarActivity)) text("Meetings can sync, but precise alarms need permission on the home screen.", 14f)
                 text("Upcoming · next 7 days", 22f, true)
                 val meetings = CalendarStore.meetings(this@CalendarActivity).filter { it.startAt > System.currentTimeMillis() }
-                if (meetings.isEmpty()) text(if (session.selected.isEmpty()) "Choose at least one calendar to enable meeting calls." else "No upcoming timed meetings in the last successful sync.", 15f)
+                if (meetings.isEmpty()) text(if (session.selected.isEmpty()) "Choose at least one calendar to enable meeting reminders." else "No upcoming timed meetings in the last successful sync.", 15f)
                 meetings.take(30).forEach { meeting ->
                     text(meeting.title, 18f)
                     text(DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(meeting.startAt)), 14f, true)
-                    if (meeting.joinUrl.isNotEmpty()) button("Join meeting") { MeetingLinks.open(this@CalendarActivity, meeting.joinUrl) }
+                    if (meeting.joinUrl.isNotEmpty()) button("Open meeting in browser") { MeetingLinks.open(this@CalendarActivity, meeting.joinUrl) }
                 }
                 text("Background refresh runs roughly every 15 minutes when Android and network access allow it. Last-minute calendar edits may arrive late; saved alarms work offline.", 14f)
                 button("Disconnect Google Calendar") {

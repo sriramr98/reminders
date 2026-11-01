@@ -1,20 +1,25 @@
 package com.sriram.callreminder
 
+import android.app.Notification
+import android.app.NotificationManager
+import android.content.Intent
+import android.media.AudioManager
+import android.os.SystemClock
+import android.view.View
+import android.widget.Button
+import android.widget.TextView
 import androidx.test.platform.app.InstrumentationRegistry
+import org.json.JSONObject
 import org.junit.After
 import org.junit.Before
 import org.junit.Assert.*
 import org.junit.Test
-import android.content.Intent
-import android.os.SystemClock
-import android.view.MotionEvent
-import android.app.Notification
-import android.app.NotificationManager
 
 class ReminderTest {
-    private val context get() = InstrumentationRegistry.getInstrumentation().targetContext
+    private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
+    private val context get() = instrumentation.targetContext
     private fun shell(command: String) {
-        val descriptor = InstrumentationRegistry.getInstrumentation().uiAutomation.executeShellCommand(command)
+        val descriptor = instrumentation.uiAutomation.executeShellCommand(command)
         android.os.ParcelFileDescriptor.AutoCloseInputStream(descriptor).bufferedReader().use { it.readText() }
     }
     @Before fun permissions() {
@@ -22,166 +27,188 @@ class ReminderTest {
         shell("pm grant ${context.packageName} android.permission.POST_NOTIFICATIONS")
         shell("appops set ${context.packageName} SCHEDULE_EXACT_ALARM allow")
         shell("appops set ${context.packageName} USE_FULL_SCREEN_INTENT allow")
+        CalendarStore.disconnect(context)
+        Reminders.cancel(context)
     }
-    @After fun cleanup() { Reminders.cancel(context) }
+    @After fun cleanup() {
+        Reminders.cancel(context)
+        CalendarStore.disconnect(context)
+        instrumentation.runOnMainSync { ReminderPresentation.visibleActivity()?.finish() }
+    }
     @Test fun productionOffsetsAreFifteenAndTwoMinutes() {
         val meeting = 1_800_000_000_000L
         assertEquals(listOf(15 to meeting - 900_000L, 2 to meeting - 120_000L), Reminders.times(meeting))
     }
-    @Test fun announcementUsesActualTimeRemainingAndHandlesBoundaries() {
+    @Test fun meetingTimingUsesActualTimeRemainingAndHandlesBoundaries() {
         val now = 1_800_000_000_000L
-        val r = Reminder(1, "Design review", now + 900_000, now, 15, false)
-        assertEquals("You have a call, Design review, to join in 15 minutes.", Announcement.text(r, now))
-        assertEquals("in 2 minutes", Announcement.remaining(now + 120_000, now))
-        assertEquals("in 1 minute", Announcement.remaining(now + 60_000, now))
-        assertEquals("in 59 seconds", Announcement.remaining(now + 59_000, now))
-        assertEquals("in 1 second", Announcement.remaining(now + 1, now))
-        assertEquals("You have a call, Design review, to join now.", Announcement.text(r, now + 900_001))
+        assertEquals("Starts in 15 minutes", ReminderInfo.remaining(now + 900_000, now))
+        assertEquals("Starts in 2 minutes", ReminderInfo.remaining(now + 120_000, now))
+        assertEquals("Starts in 1 minute", ReminderInfo.remaining(now + 60_000, now))
+        assertEquals("Starts in 59 seconds", ReminderInfo.remaining(now + 59_000, now))
+        assertEquals("Starts in 1 second", ReminderInfo.remaining(now + 1, now))
+        assertEquals("Starting now", ReminderInfo.remaining(now, now + 1))
+    }
+    @Test fun oldSpeechStateAndFieldsMigrateWithoutRestoringVoicePlayback() {
+        val legacy = Reminder(1, "Review", 1000, 100, 15, false).json()
+            .put("state", "speaking").put("spokenText", "Private meeting").put("audioRoute", "speaker")
+        val restored = Reminder.read(legacy)
+        assertEquals("dismissed", restored.state)
+        assertFalse(restored.json().has("spokenText"))
+        assertFalse(restored.json().has("audioRoute"))
+        assertEquals(restored, Reminder.read(JSONObject(restored.json().toString())))
     }
     @Test fun dismissingFirstPreservesSecondAndRestoreDoesNotDuplicate() {
         Reminders.start(context, true)
         val original = Reminders.all(context)
         assertEquals(2, original.size)
         assertEquals(40_000L, original[1].fireAt - original[0].fireAt)
-        Reminders.update(context, original[0].id, "dismissed")
+        Reminders.claim(context, original[0].id)
+        ReminderActionReceiver().onReceive(context, Intent("dismiss").putExtra("id", original[0].id))
         Reminders.restore(context)
-        val restored = Reminders.all(context)
-        assertEquals("dismissed", restored[0].state)
-        assertEquals("scheduled", restored[1].state)
-        assertEquals(original[1], restored[1])
+        assertEquals("dismissed", Reminders.all(context)[0].state)
+        assertEquals(original[1], Reminders.all(context)[1])
     }
-    @Test fun replacementUsesDifferentIdsAndOldDismissCannotMutateNewMeeting() {
+    @Test fun decliningFirstSuppressesRemainingAndStaleActionsDoNotChangeReplacement() {
         Reminders.start(context, true)
         val oldId = Reminders.all(context)[0].id
+        Reminders.claim(context, oldId)
+        ReminderActionReceiver().onReceive(context, Intent("decline").putExtra("id", oldId))
+        assertTrue(Reminders.all(context).all { it.state == "skipped" })
+        Reminders.restore(context)
+        assertNull(Reminders.claim(context, Reminders.all(context)[1].id))
         Reminders.start(context, false)
         val replacement = Reminders.all(context)
-        Reminders.update(context, oldId, "dismissed")
+        ReminderActionReceiver().onReceive(context, Intent("decline").putExtra("id", oldId))
         assertEquals(replacement, Reminders.all(context))
         assertFalse(replacement.any { it.id == oldId })
-        Reminders.cancel(context)
-        assertTrue(Reminders.all(context).isEmpty())
     }
-    @Test fun lockedScreenSwipeUsesPrivateAudioAndSecondTimesOut() {
-        val instrumentation = InstrumentationRegistry.getInstrumentation()
-        var monitor = instrumentation.addMonitor(ReminderActivity::class.java.name, null, false)
+    private fun calendarPair(url: String): List<Reminder> {
+        val start = System.currentTimeMillis() + 20 * 60_000L
+        Reminders.reconcile(context, listOf(CalendarMeeting("meeting", "primary", "event", "Design review", start, url, 0)))
+        return Reminders.all(context)
+    }
+    @Test fun onlyFinalReminderOffersBrowserAndMissingOrUnsafeLinksAreHidden() {
+        val pair = calendarPair("https://meet.google.com/abc-defg-hij")
+        val first = pair[0].copy(state = "ringing")
+        val last = pair[1].copy(state = "ringing")
+        assertFalse(ReminderInfo.canOpenMeeting(context, first))
+        assertTrue(ReminderInfo.canOpenMeeting(context, last))
+        assertFalse(ReminderInfo.canOpenMeeting(context, last.copy(joinUrl = "")))
+        assertFalse(ReminderInfo.canOpenMeeting(context, last.copy(joinUrl = "javascript:alert(1)")))
+        assertFalse(ReminderInfo.canOpenMeeting(context, last.copy(state = "skipped")))
+        val earlyNotification = RingService.notification(context, first, false)
+        val finalNotification = RingService.notification(context, last, false)
+        assertEquals(Notification.CATEGORY_ALARM, finalNotification.category)
+        assertEquals(Notification.BigTextStyle::class.java.name, finalNotification.extras.getString(Notification.EXTRA_TEMPLATE))
+        assertFalse(earlyNotification.actions.any { it.title.toString() == "Open meeting in browser" })
+        assertTrue(finalNotification.actions.any { it.title.toString() == "Open meeting in browser" })
+        assertNotNull(finalNotification.fullScreenIntent)
+        assertEquals("Meeting reminder", finalNotification.publicVersion.extras.getString(Notification.EXTRA_TITLE))
+        assertEquals(setOf("Dismiss", "Not attending"), earlyNotification.actions.map { it.title.toString() }.toSet())
+        assertNull(MeetingLinks.browserIntent(context, "intent://unsafe"))
+    }
+    @Test fun lateSyncWithOnlyOneFutureOffsetStillOffersBrowserAndDeclineSurvivesSync() {
+        val start = System.currentTimeMillis() + 5 * 60_000L
+        val meeting = CalendarMeeting("late", "primary", "event", "Late meeting", start, "https://meet.google.com/abc-defg-hij", 0)
+        Reminders.reconcile(context, listOf(meeting))
+        val r = Reminders.all(context).single()
+        assertEquals(2, r.leadMinutes)
+        assertTrue(ReminderInfo.canOpenMeeting(context, r.copy(state = "ringing")))
+        Reminders.claim(context, r.id)
+        ReminderActionReceiver().onReceive(context, Intent("decline").putExtra("id", r.id))
+        Reminders.reconcile(context, listOf(meeting))
+        assertEquals("skipped", Reminders.all(context).single().state)
+    }
+    @Test fun missedNotificationActionsWorkWithoutRingingService() {
+        val r = calendarPair("https://meet.google.com/abc-defg-hij").last()
+        Reminders.update(context, r.id, "missed")
+        val notification = RingService.notification(context, r.copy(state = "missed"), false, missed = true)
+        assertNull(notification.fullScreenIntent)
+        assertTrue(notification.actions.any { it.title.toString() == "Open meeting in browser" })
+        notification.actions.first { it.title.toString() == "Not attending" }.actionIntent.send()
+        waitFor { Reminders.all(context).all { it.state == "skipped" } }
+    }
+    @Test fun finalNotificationBrowserActionLaunchesBrowserAndDismissesOnlyCurrentReminder() {
+        shell("input keyevent 224")
+        shell("wm dismiss-keyguard")
+        val pair = calendarPair("https://meet.google.com/abc-defg-hij")
+        val last = pair.last()
+        val browser = MeetingLinks.browserIntent(context, last.joinUrl)
+        org.junit.Assume.assumeTrue("Requires an installed/default browser rather than a chooser", browser?.`package` != null)
+        assertEquals(last.joinUrl, browser!!.dataString)
+        assertEquals(Intent.ACTION_VIEW, browser.action)
+        Reminders.update(context, last.id, "missed")
+        val filter = android.content.IntentFilter(Intent.ACTION_VIEW).apply { addDataScheme("https") }
+        // Intercept external navigation so the test does not access a real meeting.
+        val browserMonitor = instrumentation.addMonitor(filter, android.app.Instrumentation.ActivityResult(android.app.Activity.RESULT_OK, null), true)
+        val reminderMonitor = instrumentation.addMonitor(ReminderActivity::class.java.name, null, false)
         try {
-            context.startActivity(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-            instrumentation.waitForIdleSync()
-            instrumentation.runOnMainSync { Reminders.start(context, true) }
-            shell("input keyevent 223")
-            val first = monitor.waitForActivityWithTimeout(20_000)
-            assertNotNull("First alarm should show its screen while locked", first)
-            val pair = Reminders.all(context)
-            assertEquals("ringing", pair[0].state)
-            instrumentation.removeMonitor(monitor)
-            instrumentation.runOnMainSync {
-                val swipe = first!!.findViewById<android.view.View>(android.R.id.content).findViewWithTag<SwipeAnswerView>("answer_swipe")
-                swipe(swipe, .25f, false)
-            }
-            assertEquals("A partial swipe must not answer", "ringing", Reminders.all(context)[0].state)
-            Thread.sleep(300) // Let the cancelled swipe return to its starting point.
-            instrumentation.runOnMainSync {
-                val swipe = first!!.findViewById<android.view.View>(android.R.id.content).findViewWithTag<SwipeAnswerView>("answer_swipe")
-                swipe(swipe, 1f, false)
-            }
-            waitFor(25_000) { Reminders.all(context)[0].state in setOf("answered", "speech unavailable", "audio unavailable") }
-            val privateAudio = context.getSystemService(android.media.AudioManager::class.java).availableCommunicationDevices
-                .any { it.type == android.media.AudioDeviceInfo.TYPE_BUILTIN_EARPIECE }
-            val expected = if (privateAudio) "answered" else "audio unavailable"
-            assertEquals("Use earpiece or fail without loudspeaker fallback", expected, Reminders.all(context)[0].state)
-            if (privateAudio) assertEquals("earpiece", Reminders.all(context)[0].audioRoute)
-            else instrumentation.runOnMainSync { first!!.finish() }
-            assertTrue(Reminders.all(context)[0].spokenText.startsWith("You have a call, Your test meeting, to join in "))
-            waitFor { first!!.isDestroyed }
-            assertEquals("scheduled", Reminders.all(context)[1].state)
-            monitor = instrumentation.addMonitor(ReminderActivity::class.java.name, null, false)
-            shell("input keyevent 223")
-            val second = monitor.waitForActivityWithTimeout(50_000)
-            assertNotNull("Second alarm should still open after dismissing the first", second)
-            assertEquals("ringing", Reminders.all(context)[1].state)
-            waitFor(35_000) { Reminders.all(context)[1].state == "missed" }
-            assertEquals(expected, Reminders.all(context)[0].state)
-        } finally { instrumentation.removeMonitor(monitor) }
-    }
-    @Test fun swipeCancellationAndAccessibilityActivation() {
-        val instrumentation = InstrumentationRegistry.getInstrumentation()
-        instrumentation.runOnMainSync {
-            var answers = 0
-            val view = SwipeAnswerView(context).apply { layout(0, 0, 400, 76); setOnClickListener { answers++ } }
-            swipe(view, 1f, true)
-            assertEquals(0, answers)
-            view.performClick() // Accessibility activation must work without a physical swipe.
-            view.performClick()
-            assertEquals("Answer callback fires once", 1, answers)
+            val notification = RingService.notification(context, last.copy(state = "missed"), false, missed = true)
+            notification.actions.first { it.title.toString() == "Open meeting in browser" }.actionIntent.send()
+            assertNotNull(reminderMonitor.waitForActivityWithTimeout(10_000))
+            waitFor { browserMonitor.hits == 1 && Reminders.all(context).last().state == "dismissed" }
+            assertEquals("scheduled", Reminders.all(context).first().state)
+        } finally {
+            instrumentation.removeMonitor(browserMonitor)
+            instrumentation.removeMonitor(reminderMonitor)
         }
     }
-    @Test fun unlockedAppOpensSwipeScreenAutomatically() {
-        val instrumentation = InstrumentationRegistry.getInstrumentation()
+    @Test fun foregroundReminderShowsDetailsAndDeclineStopsBothWithoutCallAudio() {
         shell("input keyevent 224")
         shell("wm dismiss-keyguard")
         context.startActivity(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
         instrumentation.waitForIdleSync()
+        val audio = context.getSystemService(AudioManager::class.java)
+        val originalMode = audio.mode
         val monitor = instrumentation.addMonitor(ReminderActivity::class.java.name, null, false)
         try {
             instrumentation.runOnMainSync { Reminders.start(context, true) }
-            val call = monitor.waitForActivityWithTimeout(20_000)
-            assertNotNull("Unlocked app must open its call screen without tapping a notification", call)
-            waitFor { CallPresentation.visibleActivity() === call }
-            instrumentation.waitForIdleSync()
-            Thread.sleep(250) // Capture the rendered frame, not just the activity-created event.
-            val notification = context.getSystemService(NotificationManager::class.java).activeNotifications.first { it.id == 100 }.notification
-            assertEquals("meeting_calls_visible", notification.channelId)
-            shell("screencap -p /sdcard/Download/call-reminder-open.png")
+            val reminder = monitor.waitForActivityWithTimeout(20_000)
+            assertNotNull("Foreground app should show meeting details", reminder)
+            waitFor { ReminderPresentation.visibleActivity() === reminder }
             instrumentation.runOnMainSync {
-                val decline = call!!.findViewById<android.view.View>(android.R.id.content).findViewWithTag<android.widget.Button>("decline_call")
-                decline.performClick()
+                val root = reminder!!.findViewById<View>(android.R.id.content)
+                assertEquals("Your test meeting", root.findViewWithTag<TextView>("meeting_title").text.toString())
+                assertNull(root.findViewWithTag<View>("open_meeting"))
+                assertNotNull(root.findViewWithTag<Button>("dismiss_reminder"))
+                root.findViewWithTag<Button>("decline_reminder").performClick()
             }
-            waitFor { Reminders.all(context)[0].state == "dismissed" }
-            assertEquals("scheduled", Reminders.all(context)[1].state)
+            waitFor { RingService.currentId == null }
+            assertTrue(Reminders.all(context).all { it.state == "skipped" })
+            assertEquals("Ringing must not enter communication mode", originalMode, audio.mode)
         } finally { instrumentation.removeMonitor(monitor) }
     }
-    @Test fun unlockedBackgroundOffersAnswerAndDeclineAndAnswerOpensCall() {
-        val instrumentation = InstrumentationRegistry.getInstrumentation()
+    @Test fun backgroundNotificationDismissStopsOnlyCurrentAlert() {
         shell("input keyevent 224")
         shell("wm dismiss-keyguard")
         context.startActivity(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
         instrumentation.waitForIdleSync()
         instrumentation.runOnMainSync { Reminders.start(context, true) }
-        shell("input keyevent 3") // Leave the device unlocked on the launcher.
-        waitFor(20_000) { Reminders.all(context)[0].state == "ringing" }
-        waitFor { context.getSystemService(NotificationManager::class.java).activeNotifications.any { it.id == 100 } }
-        val notification = context.getSystemService(NotificationManager::class.java).activeNotifications.first { it.id == 100 }.notification
-        assertEquals("meeting_alarms", notification.channelId)
-        assertEquals(Notification.CallStyle::class.java.name, notification.extras.getString(Notification.EXTRA_TEMPLATE))
-        assertTrue(notification.actions.any { it.title.toString().equals("Answer", true) })
-        assertTrue(notification.actions.any { it.title.toString().equals("Decline", true) })
+        shell("input keyevent 3")
+        waitFor(20_000) { RingService.currentId == Reminders.all(context)[0].id }
+        val nm = context.getSystemService(NotificationManager::class.java)
+        waitFor { nm.activeNotifications.any { it.id == RingService.NOTIFICATION_ID } }
+        val notification = nm.activeNotifications.first { it.id == RingService.NOTIFICATION_ID }.notification
+        assertEquals(RingService.ALERT_CHANNEL, notification.channelId)
+        assertEquals(Notification.CATEGORY_ALARM, notification.category)
+        notification.actions.first { it.title.toString() == "Dismiss" }.actionIntent.send()
+        waitFor { RingService.currentId == null }
+        assertEquals("dismissed", Reminders.all(context)[0].state)
+        assertEquals("scheduled", Reminders.all(context)[1].state)
+    }
+    @Test fun lockedScreenShowsMeetingDetailsAndTimeoutPreservesFinalReminder() {
+        context.startActivity(Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK))
+        instrumentation.waitForIdleSync()
         val monitor = instrumentation.addMonitor(ReminderActivity::class.java.name, null, false)
         try {
-            shell("cmd statusbar expand-notifications")
-            Thread.sleep(1000)
-            shell("screencap -p /sdcard/Download/call-reminder-background.png")
-            // System UI test fixture: Pixel 9a API 36 at its default resolution/font scale.
-            // Tap the real green Answer control observed in the captured notification.
-            val screenshot = instrumentation.uiAutomation.takeScreenshot()!!
-            assertEquals(1080, screenshot.width)
-            assertEquals(2424, screenshot.height)
-            screenshot.recycle()
-            shell("input tap 770 865")
-            assertNotNull("Notification Answer must open the call screen directly", monitor.waitForActivityWithTimeout(10_000))
-            waitFor { Reminders.all(context)[0].state in setOf("answering", "speaking", "answered", "audio unavailable") }
+            instrumentation.runOnMainSync { Reminders.start(context, true) }
+            shell("input keyevent 223")
+            val reminder = monitor.waitForActivityWithTimeout(20_000)
+            assertNotNull("Alarm should show meeting details while locked", reminder)
+            waitFor(35_000) { Reminders.all(context)[0].state == "missed" }
             assertEquals("scheduled", Reminders.all(context)[1].state)
+            instrumentation.runOnMainSync { reminder!!.finish() }
         } finally { instrumentation.removeMonitor(monitor) }
-    }
-    private fun swipe(view: SwipeAnswerView, fraction: Float, cancel: Boolean) {
-        val start = view.height / 2f
-        val at = SystemClock.uptimeMillis()
-        listOf(MotionEvent.ACTION_DOWN to start,
-            MotionEvent.ACTION_MOVE to start + (view.width - view.height) * fraction,
-            (if (cancel) MotionEvent.ACTION_CANCEL else MotionEvent.ACTION_UP) to start + (view.width - view.height) * fraction
-        ).forEachIndexed { index, (action, x) ->
-            val event = MotionEvent.obtain(at, at + index * 50, action, x, view.height / 2f, 0)
-            view.dispatchTouchEvent(event); event.recycle()
-        }
     }
     private fun waitFor(timeout: Long = 5_000, condition: () -> Boolean) {
         val deadline = SystemClock.elapsedRealtime() + timeout

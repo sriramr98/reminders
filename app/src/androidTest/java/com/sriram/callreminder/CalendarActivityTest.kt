@@ -20,8 +20,8 @@ class CalendarActivityTest {
             context.startActivity(Intent(context, CalendarActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             val activity = monitor.waitForActivityWithTimeout(10_000)!!
             val deadline = SystemClock.elapsedRealtime() + 5000
-            while (CallPresentation.visibleActivity() !== activity && SystemClock.elapsedRealtime() < deadline) Thread.sleep(50)
-            assertSame(activity, CallPresentation.visibleActivity())
+            while (ReminderPresentation.visibleActivity() !== activity && SystemClock.elapsedRealtime() < deadline) Thread.sleep(50)
+            assertSame(activity, ReminderPresentation.visibleActivity())
             instrumentation.waitForIdleSync(); Thread.sleep(250)
             return activity
         } finally { instrumentation.removeMonitor(monitor) }
@@ -57,7 +57,7 @@ class CalendarActivityTest {
                 assertEquals(2, boxes.size)
                 assertEquals(1, boxes.count { it.isChecked })
                 assertTrue(views.filterIsInstance<TextView>().any { it.text.toString() == "Design review" })
-                assertTrue(views.filterIsInstance<TextView>().any { it.text.toString() == "Join meeting" })
+                assertTrue(views.filterIsInstance<TextView>().any { it.text.toString() == "Open meeting in browser" })
             }
             capture("call-reminder-calendar-cached")
         } finally {

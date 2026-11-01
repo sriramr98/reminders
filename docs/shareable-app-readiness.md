@@ -1,6 +1,6 @@
 # Shareable app readiness tracker
 
-Status: planning / not yet implemented  
+Status: implementation in progress; device validation pending
 Updated: 2026-11-01
 
 ## Goal
@@ -8,6 +8,12 @@ Updated: 2026-11-01
 Make the existing Android Calendar reminder app easy to set up, dependable, and ready to share without developer assistance. Include the agreed change from simulated calls to information-rich, full-screen reminders and configurable reminder schedules. Avoid unrelated feature expansion.
 
 The owner has tested Calendar integration with a real account and reports that it works as expected. This validates the personal-account happy path, not yet release signing, public OAuth onboarding, or broad device compatibility.
+
+### Ringing-only implementation update
+
+The code now uses an information-first reminder screen and alarm-style notifications. TTS, swipe-to-answer, connected-call UI, earpiece routing, and Speaker controls have been removed. **Dismiss** silences only the current alert; **Not attending** suppresses the occurrence locally. The final reminder offers a browser-only meeting-link action when a valid link exists, including on its missed notification. Unlocking is required before launching the browser. App/test APK builds and lint pass; device/instrumentation execution remains pending. Configurable reminder counts/intervals are **not implemented yet**; the current 15-/2-minute schedule is unchanged.
+
+Unchecked tasks below remain release acceptance checks; implementation alone is not a claim of device verification.
 
 ### Tracking conventions
 
